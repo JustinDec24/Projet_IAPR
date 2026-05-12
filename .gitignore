@@ -14,10 +14,13 @@ data/reference_images/
 data/bg_patches/
 data/real_crops/
 data/card_templates/
-data/yolo_annotations/
 data/*.csv
+# data/yolo_annotations/ is committed: 626 manually-annotated bboxes (cannot be regenerated)
 
+# Checkpoints: only final classifier.pt and detector.pt are committed (see !rules below)
 outputs/models/*.pt
+!outputs/models/classifier.pt
+!outputs/models/detector.pt
 outputs/models/*.pth
 outputs/submissions/*.csv
 outputs/debug_scenes/
