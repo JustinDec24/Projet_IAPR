@@ -60,7 +60,14 @@ class Classifier:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.input_size: tuple[int, int] = tuple(ckpt["input_size"])
-        self.model = UnoCNN(num_classes=ckpt.get("num_classes", NUM_CLASSES))
+        # Détecte les channels depuis le state_dict si non spécifié
+        channels = ckpt.get("channels")
+        if channels is None:
+            stem_weight = ckpt["state_dict"]["stem.0.weight"]
+            c1 = stem_weight.shape[0]
+            channels = (c1, c1 * 2, c1 * 4, c1 * 8)
+        self.model = UnoCNN(num_classes=ckpt.get("num_classes", NUM_CLASSES),
+                            channels=tuple(channels))
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval().to(self.device)
 

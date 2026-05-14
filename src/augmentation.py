@@ -44,6 +44,10 @@ class AugConfig:
     bg_fringe_prob: float = 0.6
     bg_fringe_min_visible: float = 0.82
     bg_fringe_max_visible: float = 0.98
+    # Partial crop : simule un détecteur qui clip la carte. Au moins un des 2
+    # coins-digits (TL ou BR) est préservé pour garder l'image identifiable.
+    partial_crop_prob: float = 0.35
+    partial_crop_min_keep: float = 0.40  # garde au moins 40% de la dim coupée
 
 
 def augment(template: np.ndarray, rng: np.random.Generator, cfg: AugConfig | None = None) -> np.ndarray:
@@ -108,7 +112,42 @@ def augment(template: np.ndarray, rng: np.random.Generator, cfg: AugConfig | Non
     if rng.random() < cfg.bg_fringe_prob:
         img = _apply_bg_fringe(img, rng, cfg)
 
+    # 8. Partial crop : simule un détecteur qui clip 1-2 bords de la carte tout
+    # en préservant au moins le coin TL OU le coin BR (où se trouve un digit).
+    if rng.random() < cfg.partial_crop_prob:
+        img = _apply_partial_crop(img, rng, cfg)
+
     return img
+
+
+def _apply_partial_crop(img: np.ndarray, rng: np.random.Generator,
+                        cfg: AugConfig) -> np.ndarray:
+    """Crop 1-2 bords de la carte en gardant 1 coin avec digit (TL ou BR).
+
+    Le résultat fait toujours la même taille que l'image originale : la zone
+    croppée est remplacée par du fond synthétique (pour simuler ce que le
+    détecteur produirait quand le bbox déborde sur le fond).
+    """
+    h, w = img.shape[:2]
+    keep_corner = "TL" if rng.random() < 0.5 else "BR"
+    min_keep = cfg.partial_crop_min_keep
+    # Choisir des fractions de crop (0 = pas de crop, 1-min_keep = max crop)
+    max_crop = 1.0 - min_keep
+    crop_a = float(rng.uniform(0.0, max_crop))
+    crop_b = float(rng.uniform(0.0, max_crop))
+
+    bg = _synthesize_bg(h, w, rng)
+    if keep_corner == "TL":
+        # On crop le bas et la droite → garde le haut-gauche
+        keep_h = max(int(h * min_keep), int(h * (1 - crop_a)))
+        keep_w = max(int(w * min_keep), int(w * (1 - crop_b)))
+        bg[:keep_h, :keep_w] = img[:keep_h, :keep_w]
+    else:
+        # On crop le haut et la gauche → garde le bas-droit
+        start_h = min(int(h * (1 - min_keep)), int(h * crop_a))
+        start_w = min(int(w * (1 - min_keep)), int(w * crop_b))
+        bg[start_h:, start_w:] = img[start_h:, start_w:]
+    return bg
 
 
 def _synthesize_bg(h: int, w: int, rng: np.random.Generator) -> np.ndarray:

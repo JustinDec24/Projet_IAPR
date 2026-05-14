@@ -51,20 +51,24 @@ def main() -> int:
     p.add_argument("--no-detector", action="store_true", help="Use heuristic detection")
     p.add_argument("--hybrid", action="store_true",
                    help="Heuristic for center card + learned detector for players")
+    p.add_argument("--classifier", type=Path, default=CHECKPOINT)
+    p.add_argument("--detector-ckpt", type=Path, default=DETECTOR_CHECKPOINT)
     args = p.parse_args()
+    classifier_path = args.classifier
+    detector_path = args.detector_ckpt
 
-    if not CHECKPOINT.exists():
-        print(f"Checkpoint introuvable : {CHECKPOINT}")
+    if not classifier_path.exists():
+        print(f"Checkpoint introuvable : {classifier_path}")
         return 1
 
-    classifier = Classifier(CHECKPOINT)
-    print(f"Modèle : {CHECKPOINT} (device={classifier.device})")
+    classifier = Classifier(classifier_path)
+    print(f"Modèle : {classifier_path} (device={classifier.device})")
     print(f"Confidence threshold : {args.confidence}")
 
     detector = None
-    if not args.no_detector and DETECTOR_CHECKPOINT.exists():
-        detector = CardDetectorRuntime(DETECTOR_CHECKPOINT, device=str(classifier.device))
-        print(f"Détecteur : {DETECTOR_CHECKPOINT.name} (appris)")
+    if not args.no_detector and detector_path.exists():
+        detector = CardDetectorRuntime(detector_path, device=str(classifier.device))
+        print(f"Détecteur : {detector_path.name} (appris)")
     else:
         print("Détecteur : heuristique HSV")
 

@@ -33,9 +33,11 @@ from src.detection import (  # noqa: E402
     detect_active_token,
     detect_cards_in_scene,
 )
+from src.detector_inference import CardDetectorRuntime, detect_cards_with_model  # noqa: E402
 from src.inference import Classifier, predict_scene  # noqa: E402
 
 CHECKPOINT = ROOT / "outputs" / "models" / "classifier.pt"
+DETECTOR_CHECKPOINT = ROOT / "outputs" / "models" / "detector.pt"
 OUT_DIR = ROOT / "outputs" / "viz_pipeline"
 
 # Couleur BGR par "zone" joueur
@@ -79,10 +81,13 @@ def annotate_image(image: np.ndarray, cards: list[dict],
         player = assign_player(c["cx"], c["cy"], image.shape)
         color = PLAYER_COLORS[player]
         box = cv2.boxPoints(c["rect"]).astype(np.intp)
-        cv2.drawContours(vis, [box], 0, color, thickness=10)
+        # Solid stroke for heuristic, dashed-like (thinner) for learned detector
+        thickness = 10 if c.get("source") != "yolo" else 6
+        cv2.drawContours(vis, [box], 0, color, thickness=thickness)
         label = c.get("label", "?")
         conf = c.get("confidence", 0.0)
-        text = f"{label} ({conf:.2f})"
+        src_marker = "*" if c.get("source") == "yolo" else ""
+        text = f"{label}{src_marker} ({conf:.2f})"
         cv2.putText(vis, text, (int(c["cx"]) - 130, int(c["cy"]) - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 0), 6)
         cv2.putText(vis, text, (int(c["cx"]) - 130, int(c["cy"]) - 20),
@@ -133,16 +138,47 @@ def build_crops_panel(cards: list[dict], target_height: int) -> np.ndarray:
 
 
 def visualize(image_id: str, image: np.ndarray, classifier: Classifier,
-              gt: dict | None) -> np.ndarray:
-    """Pipeline complet + rendu : image annotée + panneau crops."""
-    cards = detect_cards_in_scene(image)
-    crops = [c["warped"] for c in cards]
-    preds = classifier.classify(crops)
-    for card, (label, conf) in zip(cards, preds):
-        card["label"] = label
-        card["confidence"] = conf
+              gt: dict | None,
+              detector: CardDetectorRuntime | None = None,
+              hybrid: bool = False,
+              use_tta: bool = False,
+              confidence_threshold: float = 0.40) -> np.ndarray:
+    """Pipeline complet + rendu : image annotée + panneau crops.
 
+    Reproduit la logique de `predict_scene` (hybride/détecteur/heuristique) en
+    gardant les `cards` détaillées pour la viz.
+    """
     token = detect_active_token(image)
+
+    if hybrid and detector is not None:
+        heur_cards = detect_cards_in_scene(image, exclude_xy=token)
+        model_cards = detect_cards_with_model(image, detector, exclude_xy=token)
+        cards = [c for c in heur_cards
+                 if assign_player(c["cx"], c["cy"], image.shape) == "center"]
+        cards += [c for c in model_cards
+                  if assign_player(c["cx"], c["cy"], image.shape) != "center"]
+    elif detector is not None:
+        cards = detect_cards_with_model(image, detector, exclude_xy=token)
+    else:
+        cards = detect_cards_in_scene(image, exclude_xy=token)
+
+    crops = [c["warped"] for c in cards]
+    if use_tta:
+        import torch
+        probs = classifier.classify_full_tta(crops) if crops else torch.zeros(0, 0)
+        from src.config import IDX_TO_CLASS
+        for i, card in enumerate(cards):
+            top1_idx = int(probs[i].argmax().item())
+            card["label"] = IDX_TO_CLASS[top1_idx]
+            card["confidence"] = float(probs[i, top1_idx].item())
+    else:
+        preds = classifier.classify(crops)
+        for card, (label, conf) in zip(cards, preds):
+            card["label"] = label
+            card["confidence"] = conf
+
+    cards = [c for c in cards if c["confidence"] >= confidence_threshold]
+
     active_player = assign_token_to_player(token, cards, image.shape) if token else None
 
     annotated = annotate_image(image, cards, token, active_player, gt)
@@ -169,6 +205,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--all-train", action="store_true")
     p.add_argument("--first-test", type=int, default=0, metavar="N",
                    help="visualize the first N test images")
+    p.add_argument("--hybrid", action="store_true",
+                   help="Heuristique (centre) + détecteur appris (joueurs)")
+    p.add_argument("--no-detector", action="store_true",
+                   help="Désactive le détecteur appris (heuristique seule)")
+    p.add_argument("--tta", action="store_true", help="Test-Time Augmentation 8×")
+    p.add_argument("--confidence", type=float, default=0.40)
     return p.parse_args()
 
 
@@ -199,6 +241,15 @@ def main() -> int:
 
     classifier = Classifier(CHECKPOINT)
     print(f"Classifier loaded from {CHECKPOINT}")
+
+    detector = None
+    if not args.no_detector and DETECTOR_CHECKPOINT.exists():
+        detector = CardDetectorRuntime(DETECTOR_CHECKPOINT, device=str(classifier.device))
+        mode = "hybrid" if args.hybrid else "learned"
+        print(f"Detector loaded ({mode} mode){' + TTA' if args.tta else ''}")
+    else:
+        print(f"Detector : heuristique seule{' + TTA' if args.tta else ''}")
+
     print(f"Generating {len(paths)} visualizations...")
 
     for path in paths:
@@ -207,7 +258,9 @@ def main() -> int:
             continue
         gt_row = gt_lookup.get(path.stem)
         gt = {"center": gt_row["center_card"], "active": gt_row["active_player"]} if gt_row else None
-        viz = visualize(path.stem, image, classifier, gt)
+        viz = visualize(path.stem, image, classifier, gt,
+                        detector=detector, hybrid=args.hybrid,
+                        use_tta=args.tta, confidence_threshold=args.confidence)
         out = OUT_DIR / f"{path.stem}.jpg"
         cv2.imwrite(str(out), viz, [cv2.IMWRITE_JPEG_QUALITY, 80])
         print(f"  {path.stem} -> {out.name}")

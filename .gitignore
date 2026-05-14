@@ -14,6 +14,8 @@ data/reference_images/
 data/bg_patches/
 data/real_crops/
 data/card_templates/
+data/synth_images/
+data/synth_annotations/
 data/*.csv
 # data/yolo_annotations/ is committed: 626 manually-annotated bboxes (cannot be regenerated)
 
