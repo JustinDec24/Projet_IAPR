@@ -46,7 +46,7 @@ def f1_multiset(pred: list[str], gt: list[str]) -> float:
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--confidence", type=float, default=0.40)
+    p.add_argument("--confidence", type=float, default=0.50)
     p.add_argument("--tta", action="store_true", help="Activate test-time augmentation")
     p.add_argument("--no-detector", action="store_true", help="Use heuristic detection")
     p.add_argument("--hybrid", action="store_true",

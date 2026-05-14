@@ -29,7 +29,7 @@ from .model import UnoCNN
 
 # Confidence en-dessous de laquelle on considère qu'un crop n'est pas une carte
 # (typiquement faux positif détecté dans le feuillage).
-DEFAULT_CONFIDENCE_THRESHOLD = 0.40
+DEFAULT_CONFIDENCE_THRESHOLD = 0.50
 
 
 @dataclass
