@@ -239,13 +239,21 @@ def detect_cards_in_scene(image: np.ndarray,
 
 
 def detect_active_token(image: np.ndarray) -> tuple[float, float] | None:
-    """Détecte le jeton actif (noir rectangulaire sur fond blanc OU jaune rond sur fond bruité)."""
+    """Détecte le jeton actif (noir rectangulaire OU jaune rond).
+
+    Améliorée vs version précédente : on essaie les DEUX détections plutôt que
+    de switcher sur median_V — beaucoup de "pred=EMPTY" venaient du fait que
+    sur fond intermédiaire (médian ~150), aucune des deux n'était tentée.
+    L'ordre dépend du median_V (la plus probable d'abord).
+    """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     val = hsv[..., 2]
     median_v = float(np.median(val))
     if median_v > 180:
-        return _detect_black_token(val, median_v)
-    return _detect_yellow_token(hsv)
+        # Fond clair : token noir probable, mais essai jaune en fallback
+        return _detect_black_token(val, median_v) or _detect_yellow_token(hsv)
+    # Fond bruité : token jaune probable, mais essai noir en fallback
+    return _detect_yellow_token(hsv) or _detect_black_token(val, median_v)
 
 
 def _detect_black_token(val: np.ndarray, median_v: float) -> tuple[float, float] | None:
