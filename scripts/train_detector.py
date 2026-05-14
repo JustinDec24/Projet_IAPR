@@ -1,19 +1,12 @@
-"""Entraîne le détecteur OBB multi-niveau (CenterNet++ avec FPN P3/P4/P5).
+"""Entraîne le détecteur axis-aligned, channels configurables.
 
-Stratégie d'entraînement en 2 phases :
-  Phase 1 : pre-train sur dataset synthétique (5k images avec OBB exactes)
-  Phase 2 : fine-tune sur 81 images réelles + synthétique (mix 50/50)
+Stratégie 2-phase :
+- pretrain : mix synth (5000) + real (81) avec ratio 80/20, channels [40,80,160,320]
+- finetune : real seul, lr plus bas
 
-Loss : (focal_obj + bbox_w * L1_bbox + angle_w * smooth_L1_angle) sur 3 niveaux
-
-Usage :
-    # Phase 1 : pre-train sur synth uniquement
-    python scripts/train_detector.py --phase pretrain --epochs 40
-
-    # Phase 2 : fine-tune avec mix réel + synth
-    python scripts/train_detector.py --phase finetune --epochs 40 \
-        --init-from outputs/models/detector_pretrain.pt
+Loss : focal sur obj + L1 sur bbox aux pixels centraux.
 """
+
 import argparse
 import sys
 import time
@@ -28,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.detector import CardDetector, count_parameters  # noqa: E402
-from src.detector_dataset import LEVELS, OBBDetectionDataset  # noqa: E402
+from src.detector_dataset import CardDetectionDataset  # noqa: E402
 
 DATA_DIR = ROOT / "data"
 REAL_IMG_DIR = DATA_DIR / "train_images"
@@ -50,80 +43,61 @@ def focal_loss(logits: torch.Tensor, target: torch.Tensor,
     return (pos_loss.sum() + neg_loss.sum()) / n_pos
 
 
-def bbox_l1_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def bbox_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     diff = (pred - target).abs() * mask
     n_pos = mask.sum().clamp(min=1)
     return diff.sum() / n_pos
 
 
-def angle_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Smooth L1 sur (sin θ, cos θ) au pixel central."""
-    diff = F.smooth_l1_loss(pred, target, reduction="none") * mask
-    n_pos = mask.sum().clamp(min=1)
-    return diff.sum() / n_pos
-
-
-def compute_loss(out: dict, batch: dict, bbox_w: float = 5.0,
-                 angle_w: float = 1.0) -> tuple[torch.Tensor, dict]:
-    total = torch.tensor(0.0, device=next(iter(out.values())).device)
-    breakdown: dict[str, float] = {}
-    for lvl in LEVELS:
-        l_obj = focal_loss(out[f"obj_{lvl}"], batch[f"obj_{lvl}"])
-        l_bb = bbox_l1_loss(out[f"bbox_{lvl}"], batch[f"bbox_{lvl}"], batch[f"mask_{lvl}"])
-        l_ang = angle_loss(out[f"angle_{lvl}"], batch[f"angle_{lvl}"], batch[f"mask_{lvl}"])
-        total = total + l_obj + bbox_w * l_bb + angle_w * l_ang
-        breakdown[f"{lvl}_obj"] = l_obj.item()
-        breakdown[f"{lvl}_bb"] = l_bb.item()
-        breakdown[f"{lvl}_ang"] = l_ang.item()
-    return total, breakdown
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--phase", choices=["pretrain", "finetune"], required=True)
+    p.add_argument("--phase", choices=["pretrain", "finetune"], default="pretrain")
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--samples-per-epoch", type=int, default=2000)
     p.add_argument("--lr", type=float, default=2e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--bbox-weight", type=float, default=5.0)
-    p.add_argument("--angle-weight", type=float, default=1.0)
+    p.add_argument("--bbox-weight", type=float, default=5.0,
+                   help="Poids relatif de la loss bbox vs objectness")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--channels", type=int, nargs=4, default=[40, 80, 160, 320],
+                   help="Largeurs des 4 stages")
     p.add_argument("--init-from", type=Path, default=None,
-                   help="checkpoint à charger pour le fine-tune")
+                   help="Checkpoint à charger (pour fine-tune)")
     p.add_argument("--out-name", type=str, default=None,
-                   help="nom du checkpoint (default: detector_<phase>.pt)")
+                   help="Nom du checkpoint (default: detector_<phase>.pt)")
+    p.add_argument("--synth-weight", type=float, default=0.80,
+                   help="Poids du synthétique dans le mix (0.80 = 80/20)")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device : {device}")
     print(f"Phase  : {args.phase}")
 
+    # Datasets selon la phase
     if args.phase == "pretrain":
-        # 100% synthétique
-        img_dirs = [SYNTH_IMG_DIR]
-        ann_dirs = [SYNTH_ANN_DIR]
-        weights = [1.0]
-    else:
-        # 50% synth + 50% réel
         img_dirs = [SYNTH_IMG_DIR, REAL_IMG_DIR]
         ann_dirs = [SYNTH_ANN_DIR, REAL_ANN_DIR]
-        weights = [0.5, 0.5]
+        weights = [args.synth_weight, 1.0 - args.synth_weight]
+    else:
+        img_dirs = [REAL_IMG_DIR]
+        ann_dirs = [REAL_ANN_DIR]
+        weights = [1.0]
 
-    train_ds = OBBDetectionDataset(
+    train_ds = CardDetectionDataset(
         img_dirs, ann_dirs, weights=weights,
         augment=True, n_samples=args.samples_per_epoch, seed=args.seed,
     )
-    val_ds = OBBDetectionDataset(
+    val_ds = CardDetectionDataset(
         img_dirs, ann_dirs, weights=weights,
         augment=False, n_samples=200, seed=args.seed + 1,
     )
-
     print(f"Sources : {[str(d.name) for d in img_dirs]} (weights={weights})")
     print(f"Train samples/epoch : {len(train_ds)}")
 
@@ -134,14 +108,14 @@ def main() -> None:
                             num_workers=args.num_workers, pin_memory=device.type == "cuda",
                             persistent_workers=args.num_workers > 0)
 
-    model = CardDetector().to(device)
+    model = CardDetector(channels=tuple(args.channels)).to(device)
     n_params = count_parameters(model)
-    print(f"Detector : {n_params:,} params ({n_params / 1e6:.2f} M)")
+    print(f"Detector channels={args.channels} : {n_params:,} params ({n_params / 1e6:.2f} M)")
 
     if args.init_from is not None and args.init_from.exists():
-        ckpt = torch.load(args.init_from, map_location=device)
+        ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["state_dict"])
-        print(f"Init from : {args.init_from}")
+        print(f"Init from : {args.init_from.name}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -149,67 +123,72 @@ def main() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     out_name = args.out_name or f"detector_{args.phase}.pt"
     out_path = MODELS_DIR / out_name
-    best_val = float("inf")
+    best_val_loss = float("inf")
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         t0 = time.time()
         train_loss_sum = 0.0
-        train_breakdown_sum: dict[str, float] = {}
+        train_obj_sum = 0.0
+        train_bbox_sum = 0.0
         n_batches = 0
 
         for batch in train_loader:
-            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            out = model(batch["image"])
-            loss, breakdown = compute_loss(out, batch,
-                                            bbox_w=args.bbox_weight,
-                                            angle_w=args.angle_weight)
+            img = batch["image"].to(device, non_blocking=True)
+            obj_t = batch["obj_target"].to(device, non_blocking=True)
+            bbox_t = batch["bbox_target"].to(device, non_blocking=True)
+            mask = batch["bbox_mask"].to(device, non_blocking=True)
+
+            out = model(img)
+            loss_obj = focal_loss(out["obj"], obj_t)
+            loss_bbox = bbox_loss(out["bbox"], bbox_t, mask)
+            loss = loss_obj + args.bbox_weight * loss_bbox
+
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
             train_loss_sum += loss.item()
-            for k, v in breakdown.items():
-                train_breakdown_sum[k] = train_breakdown_sum.get(k, 0.0) + v
+            train_obj_sum += loss_obj.item()
+            train_bbox_sum += loss_bbox.item()
             n_batches += 1
 
         train_loss = train_loss_sum / max(n_batches, 1)
-        train_breakdown = {k: v / max(n_batches, 1) for k, v in train_breakdown_sum.items()}
+        train_obj = train_obj_sum / max(n_batches, 1)
+        train_bbox = train_bbox_sum / max(n_batches, 1)
 
-        # Validation
         model.eval()
         val_loss_sum = 0.0
         val_n = 0
         with torch.no_grad():
             for batch in val_loader:
-                batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-                out = model(batch["image"])
-                loss, _ = compute_loss(out, batch,
-                                        bbox_w=args.bbox_weight,
-                                        angle_w=args.angle_weight)
-                val_loss_sum += loss.item()
+                img = batch["image"].to(device, non_blocking=True)
+                obj_t = batch["obj_target"].to(device, non_blocking=True)
+                bbox_t = batch["bbox_target"].to(device, non_blocking=True)
+                mask = batch["bbox_mask"].to(device, non_blocking=True)
+                out = model(img)
+                lo = focal_loss(out["obj"], obj_t)
+                lb = bbox_loss(out["bbox"], bbox_t, mask)
+                val_loss_sum += (lo + args.bbox_weight * lb).item()
                 val_n += 1
         val_loss = val_loss_sum / max(val_n, 1)
         scheduler.step()
         dt = time.time() - t0
 
-        # Brief log
-        obj_sum = sum(train_breakdown[f"{lvl}_obj"] for lvl in LEVELS)
-        bb_sum = sum(train_breakdown[f"{lvl}_bb"] for lvl in LEVELS)
-        ang_sum = sum(train_breakdown[f"{lvl}_ang"] for lvl in LEVELS)
         print(f"epoch {epoch:>3d}/{args.epochs} | "
-              f"train {train_loss:.4f} (obj {obj_sum:.3f} bb {bb_sum:.3f} ang {ang_sum:.3f}) | "
+              f"train {train_loss:.4f} (obj {train_obj:.4f} bb {train_bbox:.4f}) | "
               f"val {val_loss:.4f} | {dt:.1f}s")
 
-        if val_loss < best_val:
-            best_val = val_loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             torch.save({
                 "state_dict": model.state_dict(),
                 "epoch": epoch, "val_loss": val_loss,
+                "channels": list(args.channels),
                 "phase": args.phase,
             }, out_path)
 
-    print(f"\n=> Best val_loss : {best_val:.4f}")
+    print(f"\n=> Best val_loss : {best_val_loss:.4f}")
     print(f"   Checkpoint : {out_path}")
 
 

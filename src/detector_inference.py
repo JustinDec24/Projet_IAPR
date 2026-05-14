@@ -52,7 +52,20 @@ class CardDetectorRuntime:
     def __init__(self, checkpoint_path: Path, device: str | None = None) -> None:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        self.model = CardDetector()
+        # Auto-détection des channels depuis le state_dict pour support des
+        # versions baseline (700k) et scaled (5M).
+        channels = ckpt.get("channels")
+        if channels is None:
+            stem_w = ckpt["state_dict"]["stem.0.0.weight"]
+            c1 = stem_w.shape[0]
+            stage3_last = ckpt["state_dict"]["stage3.1.conv2.weight"]
+            c4 = stage3_last.shape[0]
+            stage1_last = ckpt["state_dict"]["stage1.1.conv2.weight"]
+            c2 = stage1_last.shape[0]
+            stage2_last = ckpt["state_dict"]["stage2.1.conv2.weight"]
+            c3 = stage2_last.shape[0]
+            channels = (c1, c2, c3, c4)
+        self.model = CardDetector(channels=tuple(channels))
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval().to(self.device)
 

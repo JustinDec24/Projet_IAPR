@@ -33,41 +33,65 @@ def _gaussian_2d(shape: tuple[int, int], cx: float, cy: float, sigma: float) -> 
 
 
 class CardDetectionDataset(Dataset):
+    """Détection axis-aligned. Accepte multi-sources (synth + real)."""
     def __init__(
         self,
-        image_dir: Path,
-        annot_dir: Path,
+        image_dirs: list[Path] | Path,
+        annot_dirs: list[Path] | Path,
+        weights: list[float] | None = None,
         augment: bool = True,
         n_samples: int = 1000,
         seed: int = 0,
     ) -> None:
-        self.image_dir = Path(image_dir)
-        self.annot_dir = Path(annot_dir)
+        # Support legacy single-dir argument
+        if isinstance(image_dirs, (str, Path)):
+            image_dirs = [image_dirs]
+            annot_dirs = [annot_dirs]
+        self.image_dirs = [Path(d) for d in image_dirs]
+        self.annot_dirs = [Path(d) for d in annot_dirs]
         self.augment = augment
         self.n_samples = n_samples
         self.seed = seed
 
-        self.image_paths = sorted(self.image_dir.glob("*.jpg"))
-        if not self.image_paths:
-            raise FileNotFoundError(f"No images in {image_dir}")
-
-        # Pré-charger les annotations (rapide, c'est juste des floats)
-        self.annotations: list[np.ndarray] = []
-        for img_path in self.image_paths:
-            annot_path = self.annot_dir / f"{img_path.stem}.txt"
-            if not annot_path.exists():
-                self.annotations.append(np.zeros((0, 4), dtype=np.float32))
+        # Charger les sources
+        self.sources: list[tuple[list[Path], list[np.ndarray]]] = []
+        for img_dir, ann_dir in zip(self.image_dirs, self.annot_dirs):
+            image_paths = sorted(img_dir.glob("*.jpg")) + sorted(img_dir.glob("*.png"))
+            if not image_paths:
                 continue
-            boxes = []
-            for line in annot_path.read_text().strip().split("\n"):
-                if not line.strip():
+            annotations = []
+            for img_path in image_paths:
+                annot_path = ann_dir / f"{img_path.stem}.txt"
+                if not annot_path.exists():
+                    annotations.append(np.zeros((0, 4), dtype=np.float32))
                     continue
-                parts = line.split()
-                if len(parts) != 5:
-                    continue
-                # class_idx cx cy w h (tous normalisés à [0, 1])
-                boxes.append([float(p) for p in parts[1:5]])
-            self.annotations.append(np.array(boxes, dtype=np.float32).reshape(-1, 4))
+                boxes = []
+                for line in annot_path.read_text().strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split()
+                    # Support 5 (axis-aligned) ou 6 (avec angle, drop angle) valeurs
+                    if len(parts) < 5:
+                        continue
+                    boxes.append([float(p) for p in parts[1:5]])
+                annotations.append(np.array(boxes, dtype=np.float32).reshape(-1, 4))
+            self.sources.append((image_paths, annotations))
+
+        if not self.sources:
+            raise FileNotFoundError(f"No images found in {image_dirs}")
+
+        # Weights : par défaut proportionnel au nombre d'images par source
+        if weights is None:
+            counts = [len(s[0]) for s in self.sources]
+            total = sum(counts)
+            self.weights = [c / total for c in counts]
+        else:
+            s = sum(weights)
+            self.weights = [w / s for w in weights]
+
+        # Backward compat
+        self.image_paths = self.sources[0][0]
+        self.annotations = self.sources[0][1]
 
     def __len__(self) -> int:
         return self.n_samples
@@ -77,9 +101,12 @@ class CardDetectionDataset(Dataset):
         seed = self.seed + idx + (worker.id * 1_000_003 if worker else 0)
         rng = np.random.default_rng(seed)
 
-        img_idx = int(rng.integers(0, len(self.image_paths)))
-        image = cv2.imread(str(self.image_paths[img_idx]))
-        bboxes = self.annotations[img_idx].copy()  # (N, 4) normalisé image originale
+        # Choix de source pondéré
+        src_idx = int(rng.choice(len(self.sources), p=self.weights))
+        image_paths, annotations = self.sources[src_idx]
+        img_idx = int(rng.integers(0, len(image_paths)))
+        image = cv2.imread(str(image_paths[img_idx]))
+        bboxes = annotations[img_idx].copy()  # (N, 4) normalisé image originale
 
         h0, w0 = image.shape[:2]
 

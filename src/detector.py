@@ -62,23 +62,24 @@ class CardDetector(nn.Module):
                                           tous normalisés à [0, 1] de l'image
     """
 
-    def __init__(self) -> None:
+    def __init__(self,
+                 channels: tuple[int, int, int, int] = (16, 32, 64, 96)) -> None:
         super().__init__()
-        # Channels réduits (~700k params) pour rester compatible avec la limite
-        # combinée détecteur + classifieur ≤ 12M (interprétation safe du règlement).
+        c1, c2, c3, c4 = channels
         # Stem 2×
-        self.stem = nn.Sequential(_conv_bn(3, 16, kernel=3, stride=2))
-        # Stage 1 : 16 → 32, downsample 2× (total 4×)
-        self.stage1 = nn.Sequential(BasicBlock(16, 32, stride=2), BasicBlock(32, 32))
-        # Stage 2 : 32 → 64, downsample 2× (total 8×)
-        self.stage2 = nn.Sequential(BasicBlock(32, 64, stride=2), BasicBlock(64, 64))
-        # Stage 3 : 64 → 96, downsample 2× (total 16×)
-        self.stage3 = nn.Sequential(BasicBlock(64, 96, stride=2), BasicBlock(96, 96))
+        self.stem = nn.Sequential(_conv_bn(3, c1, kernel=3, stride=2))
+        # Stage 1 : c1 → c2, downsample 2× (total 4×)
+        self.stage1 = nn.Sequential(BasicBlock(c1, c2, stride=2), BasicBlock(c2, c2))
+        # Stage 2 : c2 → c3, downsample 2× (total 8×)
+        self.stage2 = nn.Sequential(BasicBlock(c2, c3, stride=2), BasicBlock(c3, c3))
+        # Stage 3 : c3 → c4, downsample 2× (total 16×)
+        self.stage3 = nn.Sequential(BasicBlock(c3, c4, stride=2), BasicBlock(c4, c4))
 
         # Head : conv 3×3 commun puis 1×1 pour objectness et bbox
-        self.head_shared = _conv_bn(96, 64)
-        self.head_obj = nn.Conv2d(64, 1, kernel_size=1)
-        self.head_bbox = nn.Conv2d(64, 4, kernel_size=1)
+        head_c = max(64, c4 // 2)
+        self.head_shared = _conv_bn(c4, head_c)
+        self.head_obj = nn.Conv2d(head_c, 1, kernel_size=1)
+        self.head_bbox = nn.Conv2d(head_c, 4, kernel_size=1)
 
         # Init du biais d'objectness pour partir bas (prior = beaucoup de neg)
         nn.init.constant_(self.head_obj.bias, -4.6)  # sigmoid(-4.6) ≈ 0.01
