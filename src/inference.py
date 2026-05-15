@@ -185,24 +185,33 @@ def predict_scene(
                 card["label"] = IDX_TO_CLASS[top1_idx]
                 card["confidence"] = top1_conf
 
+    # On sépare la carte centrale des cartes joueurs AVANT le filtre confiance.
+    # La carte centrale est unique (1 par image) : une prédiction même peu sûre
+    # vaut mieux qu'EMPTY (toujours faux). On NE la filtre donc PAS par confiance.
+    h, w = image.shape[:2]
+    center_candidates = [c for c in cards
+                         if assign_player(c["cx"], c["cy"], image.shape) == "center"
+                         and c["label"] != NON_CARD_LABEL]
+
+    pred = ScenePrediction(image_id=image_id)
+    if center_candidates:
+        # La plus proche du centre image, sans seuil de confiance
+        best = min(center_candidates,
+                   key=lambda c: (c["cx"] - w / 2) ** 2 + (c["cy"] - h / 2) ** 2)
+        pred.center_card = best["label"]
+
+    # Cartes joueurs : filtrées par confiance (précision sur le F1)
     cards = [c for c in cards
              if c["confidence"] >= confidence_threshold and c["label"] != NON_CARD_LABEL]
     if not cards:
-        return ScenePrediction(image_id=image_id)
+        return pred
 
-    # Assignation aux joueurs / center
+    # Assignation aux joueurs (center exclu — déjà traité)
     by_player: dict[str, list[dict]] = defaultdict(list)
     for c in cards:
         slot = assign_player(c["cx"], c["cy"], image.shape)
-        by_player[slot].append(c)
-
-    pred = ScenePrediction(image_id=image_id)
-    # Carte centrale : la plus proche du centre parmi celles classées "center"
-    if by_player.get("center"):
-        h, w = image.shape[:2]
-        best = min(by_player["center"],
-                   key=lambda c: (c["cx"] - w / 2) ** 2 + (c["cy"] - h / 2) ** 2)
-        pred.center_card = best["label"]
+        if slot != "center":
+            by_player[slot].append(c)
 
     for slot in ("p1", "p2", "p3", "p4"):
         pred.player_cards[slot] = [c["label"] for c in by_player.get(slot, [])]
