@@ -35,3 +35,15 @@ outputs/*.csv
 .idea/
 .DS_Store
 Thumbs.db
+
+# V3 artefacts
+data/synthetic/
+data/corners_test/
+data/real_crops_rejected/
+checkpoints/*.pth
+!checkpoints/v3_corner_detector.pth
+!checkpoints/v3_corner_classifier.pth
+logs/
+reports/v3_synthetic_qa/
+reports/v3_real_corners/
+reports/*.png
