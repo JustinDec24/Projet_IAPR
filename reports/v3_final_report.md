@@ -78,14 +78,44 @@ preuve visuelle*. La preuve visuelle (coins lisibles par un humain) était
 correcte mais ne garantissait pas qu'un CNN entraîné sur synthétique
 généralise au réel sur ces petits crops.
 
+## 6bis. Tentative de récupération — hybride V3-détecteur + V2-classifieur
+
+Idée : contourner le maillon faible (corner-classifier 0.76) en gardant la
+force de chaque approche — corner-detector pour la **localisation** (0.99,
+robuste occlusion) + classifieur full-card V2 pour le **label** (0.925 val).
+Reconstruction de la carte depuis les 2 coins-digit → warp → classif V2.
+
+| Variante hybride | CenterAcc | ActiveAcc | F1 | Score |
+|---|---|---|---|---|
+| rotated-rect (angle reconstruit) | 0.481 | 0.741 | 0.617 | 0.616 |
+| **axis-aligned (TTA gère l'angle)** | 0.728 | 0.741 | 0.736 | 0.736 |
+| + token→carte-proche | 0.728 | **0.790** | 0.736 | **0.741** |
+| + diag range resserrée [240,430] | — | — | — | 0.722 |
+
+Découverte clé : la **reconstruction d'angle depuis 2 coins** est ambiguë
+(ordre des coins → ±180°, swap w/h) ; passer en **bbox axis-aligned + TTA
+rotation du classifieur** fait bondir 0.616 → 0.736. Meilleur hybride :
+**0.741**, soit **-0.046 vs V2 0.787**.
+
+Le gap résiduel : reconstruire une carte depuis 2 points est intrinsèquement
+moins précis qu'une détection directe de carte (V2). CenterAcc 0.728 vs 0.901,
+F1 0.736 vs 0.797 → crops moins nets → classif légèrement dégradée.
+
 ## 7. Décision
 
 **Submission = V2 (Score 0.787, branche `v2`, `submission_v2.csv`).**
 
-V3 est conservé sur la branche `v3` comme étude rigoureuse (détecteur de
-coins réutilisable à 0.985, dataset synthétique, analyse d'échec quantifiée).
-Pistes non explorées faute de temps/ROI :
-- Combler le gap : extraire ~1100 vrais coins (rotation-aware sur les 81
-  images) pour ré-entraîner le classifier avec bien plus de réel.
-- Pipeline hybride : détecteur de coins pour la *localisation* (0.99) +
-  classifieur full-card pour le *label* (réintroduit le coût params V2).
+Exploration exhaustive menée (6 variantes corner testées, de 0.39 à 0.741) :
+aucune ne bat V2. Le meilleur hybride (0.741, corner-detector + V2-classifier
+axis-aligned) reste -0.046 sous V2. Conclusion data-driven : sur ce dataset,
+la **détection directe de carte** (V2) produit des crops plus nets que la
+reconstruction depuis coins, et le **gap synthétique→réel** plombe tout
+classifieur de coin dédié.
+
+V3 conservé sur branche `v3` comme étude rigoureuse — forte valeur rapport
+(le règlement EPFL valorise "understanding and reasoning") :
+- détecteur de coins réutilisable F1 0.985 (occlusion-robuste),
+- dataset synthétique 5000 scènes occlusion-aware,
+- analyse d'échec quantifiée + 6 ablations chiffrées,
+- leçon transférable : un sous-composant à 0.99 ne sauve pas un pipeline si
+  la composition des incertitudes et un domain-gap dominent.
