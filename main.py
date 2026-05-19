@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
                    help="Checkpoint du détecteur (utilisé si présent, sinon heuristique)")
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--test-dir", type=Path, default=TEST_DIR)
-    p.add_argument("--confidence", type=float, default=0.40)
+    p.add_argument("--confidence", type=float, default=0.50)
     p.add_argument("--tta", action="store_true", help="Activate test-time augmentation")
     p.add_argument("--no-detector", action="store_true",
                    help="Désactiver le détecteur appris (fallback sur la détection heuristique)")

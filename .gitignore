@@ -14,6 +14,8 @@ data/reference_images/
 data/bg_patches/
 data/real_crops/
 data/card_templates/
+data/synth_images/
+data/synth_annotations/
 data/*.csv
 # data/yolo_annotations/ is committed: 626 manually-annotated bboxes (cannot be regenerated)
 
@@ -33,3 +35,22 @@ outputs/*.csv
 .idea/
 .DS_Store
 Thumbs.db
+
+# v2.x generated artefacts (lourds, regenerables)
+data/synthetic/
+data/real_crops_v3/
+data/real_crops_combined/
+data/real_crops_rejected/
+data/corners_test/
+checkpoints/
+logs/
+outputs/probe_corners/
+outputs/test_corners/
+outputs/viz_obb/
+outputs/viz_obb_pretrain/
+outputs/viz_obb_synth/
+outputs/synth_preview.jpg
+reports/v3_synthetic_qa/
+reports/v3_real_corners/
+reports/v3_corner_samples.png
+reports/v3_hybrid_eval.csv

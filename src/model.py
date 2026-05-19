@@ -50,26 +50,36 @@ def _make_stage(in_c: int, out_c: int, n_blocks: int, downsample: bool) -> nn.Se
 
 
 class UnoCNN(nn.Module):
-    def __init__(self, num_classes: int = NUM_CLASSES) -> None:
+    """ResNet-18-like classifier dont les channels sont configurables.
+
+    Default (channels=[64, 128, 256, 512]) -> ~11.2M params (le "teacher" pour
+    la distillation).
+    Compact (channels=[48, 96, 192, 384]) -> ~6.2M params (le "student", pour
+    libérer du budget côté détecteur).
+    """
+
+    def __init__(self, num_classes: int = NUM_CLASSES,
+                 channels: tuple[int, int, int, int] = (64, 128, 256, 512)) -> None:
         super().__init__()
+        c1, c2, c3, c4 = channels
 
         # Stem : on garde la résolution spatiale pleine au début (convs 3×3, no
         # stride agressif) car les chiffres/symboles UNO sont des features
         # localisées dont on ne veut pas perdre la définition trop tôt.
         self.stem = nn.Sequential(
-            nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(3, c1, 3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True),
         )
-        self.stage1 = _make_stage(64, 64, n_blocks=2, downsample=False)
-        self.stage2 = _make_stage(64, 128, n_blocks=2, downsample=True)
-        self.stage3 = _make_stage(128, 256, n_blocks=2, downsample=True)
-        self.stage4 = _make_stage(256, 512, n_blocks=2, downsample=True)
+        self.stage1 = _make_stage(c1, c1, n_blocks=2, downsample=False)
+        self.stage2 = _make_stage(c1, c2, n_blocks=2, downsample=True)
+        self.stage3 = _make_stage(c2, c3, n_blocks=2, downsample=True)
+        self.stage4 = _make_stage(c3, c4, n_blocks=2, downsample=True)
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Dropout(0.3),
-            nn.Linear(512, num_classes),
+            nn.Linear(c4, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

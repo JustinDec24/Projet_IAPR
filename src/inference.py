@@ -17,7 +17,9 @@ import cv2
 import numpy as np
 import torch
 
-from .config import IDX_TO_CLASS, NON_CARD_LABEL, NUM_CLASSES
+from .config import DATA_DIR, IDX_TO_CLASS, NON_CARD_LABEL, NUM_CLASSES
+
+_TEMPLATES_DIR = DATA_DIR / "card_templates"
 from .detection import (
     assign_player,
     assign_token_to_player,
@@ -29,7 +31,7 @@ from .model import UnoCNN
 
 # Confidence en-dessous de laquelle on considère qu'un crop n'est pas une carte
 # (typiquement faux positif détecté dans le feuillage).
-DEFAULT_CONFIDENCE_THRESHOLD = 0.40
+DEFAULT_CONFIDENCE_THRESHOLD = 0.50
 
 
 @dataclass
@@ -60,7 +62,14 @@ class Classifier:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.input_size: tuple[int, int] = tuple(ckpt["input_size"])
-        self.model = UnoCNN(num_classes=ckpt.get("num_classes", NUM_CLASSES))
+        # Détecte les channels depuis le state_dict si non spécifié
+        channels = ckpt.get("channels")
+        if channels is None:
+            stem_weight = ckpt["state_dict"]["stem.0.weight"]
+            c1 = stem_weight.shape[0]
+            channels = (c1, c1 * 2, c1 * 4, c1 * 8)
+        self.model = UnoCNN(num_classes=ckpt.get("num_classes", NUM_CLASSES),
+                            channels=tuple(channels))
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval().to(self.device)
 
@@ -126,6 +135,8 @@ def predict_scene(
     use_tta: bool = False,
     detector: CardDetectorRuntime | None = None,
     hybrid: bool = False,
+    center_tpl_match: bool = False,  # NCC template-match : echec (CenterAcc 0.21)
+    center_tpl_min_conf: float = 0.55,
 ) -> ScenePrediction:
     """Pipeline complet : image → ScenePrediction.
 
@@ -141,11 +152,17 @@ def predict_scene(
     if hybrid and detector is not None:
         heur_cards = detect_cards_in_scene(image, exclude_xy=token)
         model_cards = detect_cards_with_model(image, detector, exclude_xy=token)
-        # Garde l'heuristique pour la zone centrale, le détecteur appris pour les joueurs
+        # Joueurs : détecteur appris. Centre : on garde les DEUX vues
+        # (heuristique + détecteur appris) → ensemble 0-param sur la carte
+        # centrale (on choisira la plus confiante en aval).
         cards = [c for c in heur_cards
                  if assign_player(c["cx"], c["cy"], image.shape) == "center"]
-        cards += [c for c in model_cards
-                  if assign_player(c["cx"], c["cy"], image.shape) != "center"]
+        for c in model_cards:
+            z = assign_player(c["cx"], c["cy"], image.shape)
+            if z != "center":
+                cards.append(c)
+            else:
+                cards.append(c)  # vue détecteur-appris du centre (ensemble)
     elif detector is not None:
         cards = detect_cards_with_model(image, detector, exclude_xy=token)
     else:
@@ -178,24 +195,54 @@ def predict_scene(
                 card["label"] = IDX_TO_CLASS[top1_idx]
                 card["confidence"] = top1_conf
 
+    # On sépare la carte centrale des cartes joueurs AVANT le filtre confiance.
+    # La carte centrale est unique (1 par image) : une prédiction même peu sûre
+    # vaut mieux qu'EMPTY (toujours faux). On NE la filtre donc PAS par confiance.
+    h, w = image.shape[:2]
+    center_candidates = [c for c in cards
+                         if assign_player(c["cx"], c["cy"], image.shape) == "center"
+                         and c["label"] != NON_CARD_LABEL]
+
+    pred = ScenePrediction(image_id=image_id)
+    if center_candidates:
+        # Ensemble 0-param : parmi les vues du centre (heuristique +
+        # détecteur appris), on prend la prédiction la plus confiante,
+        # en se restreignant aux candidats vraiment proches du centre image.
+        cx_w, cy_h = w / 2, h / 2
+        d_sorted = sorted(center_candidates,
+                          key=lambda c: (c["cx"] - cx_w) ** 2 + (c["cy"] - cy_h) ** 2)
+        diag2 = (w * w + h * h)
+        near = [c for c in d_sorted
+                if ((c["cx"] - cx_w) ** 2 + (c["cy"] - cy_h) ** 2) < 0.05 * diag2]
+        pool = near if near else d_sorted[:1]
+        best = max(pool, key=lambda c: c.get("confidence", 0.0))
+        center_label = best["label"]
+        # Override par template-matching (0 param) : la carte centrale est
+        # isolée/nette → un NN sur les 54 templates y est très fiable. On
+        # remplace le label du student si le match template est confiant.
+        if center_tpl_match:
+            try:
+                from .v3.center_card_matcher import match_center_card
+                tpl_lbl, tpl_conf = match_center_card(
+                    best["warped"], _TEMPLATES_DIR)
+                if tpl_lbl and tpl_conf >= center_tpl_min_conf:
+                    center_label = tpl_lbl
+            except Exception:
+                pass
+        pred.center_card = center_label
+
+    # Cartes joueurs : filtrées par confiance (précision sur le F1)
     cards = [c for c in cards
              if c["confidence"] >= confidence_threshold and c["label"] != NON_CARD_LABEL]
     if not cards:
-        return ScenePrediction(image_id=image_id)
+        return pred
 
-    # Assignation aux joueurs / center
+    # Assignation aux joueurs (center exclu — déjà traité)
     by_player: dict[str, list[dict]] = defaultdict(list)
     for c in cards:
         slot = assign_player(c["cx"], c["cy"], image.shape)
-        by_player[slot].append(c)
-
-    pred = ScenePrediction(image_id=image_id)
-    # Carte centrale : la plus proche du centre parmi celles classées "center"
-    if by_player.get("center"):
-        h, w = image.shape[:2]
-        best = min(by_player["center"],
-                   key=lambda c: (c["cx"] - w / 2) ** 2 + (c["cy"] - h / 2) ** 2)
-        pred.center_card = best["label"]
+        if slot != "center":
+            by_player[slot].append(c)
 
     for slot in ("p1", "p2", "p3", "p4"):
         pred.player_cards[slot] = [c["label"] for c in by_player.get(slot, [])]

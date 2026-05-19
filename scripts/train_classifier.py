@@ -45,6 +45,8 @@ def parse_args() -> argparse.Namespace:
                    help="Désactiver les bg patches (non_card class)")
     p.add_argument("--init-from", type=Path, default=None,
                    help="Checkpoint pour initialiser les poids (fine-tuning)")
+    p.add_argument("--channels", type=int, nargs=4, default=[64, 128, 256, 512],
+                   help="Largeurs des 4 stages (default teacher [64,128,256,512] ~11.2M)")
     return p.parse_args()
 
 
@@ -108,9 +110,9 @@ def main() -> None:
         persistent_workers=args.num_workers > 0,
     )
 
-    model = UnoCNN(num_classes=NUM_CLASSES).to(device)
+    model = UnoCNN(num_classes=NUM_CLASSES, channels=tuple(args.channels)).to(device)
     n_params = count_parameters(model)
-    print(f"Model    : UnoCNN | {n_params:,} params ({n_params / 1e6:.2f} M)")
+    print(f"Model    : UnoCNN(channels={args.channels}) | {n_params:,} params ({n_params / 1e6:.2f} M)")
 
     if args.init_from is not None and args.init_from.exists():
         ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
