@@ -1,13 +1,19 @@
-"""Génère le fichier de soumission Kaggle pour la compétition IAPR-26 UNO Vision.
+"""Produces the EXACT Kaggle submission for the IAPR-26 UNO Vision challenge.
 
-Usage :
-    python main.py [--checkpoint outputs/models/classifier.pt] \
-                   [--output outputs/submissions/submission.csv]
+Final pipeline (Score 0.850, 11.08M params):
+- learned CenterNet detector  outputs/models/detector.pt    (4.77M)
+- distilled student classifier outputs/models/classifier.pt  (6.31M)
+- hybrid detection + 8x TTA + 0-param center-card ensemble
 
-Hypothèses :
-- `data/test_images/` contient les images de test (.jpg)
-- `data/card_templates/` est déjà généré (script `extract_templates.py`)
-- `outputs/models/classifier.pt` contient le checkpoint du CNN entraîné
+Just run:
+    python main.py
+→ writes outputs/submissions/submission.csv (the file uploaded to Kaggle).
+
+TTA and hybrid mode are ON by default (required to reproduce 0.850).
+Disable with --no-tta / --no-hybrid for ablation only.
+
+Assumptions: data/test_images/*.jpg present, data/card_templates/ generated,
+checkpoints present in outputs/models/.
 """
 
 import argparse
@@ -38,11 +44,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--test-dir", type=Path, default=TEST_DIR)
     p.add_argument("--confidence", type=float, default=0.50)
-    p.add_argument("--tta", action="store_true", help="Activate test-time augmentation")
+    # TTA + hybrid ON by default (required for the 0.850 Kaggle submission).
+    p.add_argument("--no-tta", dest="tta", action="store_false",
+                   help="Disable 8x test-time augmentation (ablation only)")
+    p.add_argument("--no-hybrid", dest="hybrid", action="store_false",
+                   help="Disable hybrid mode + center ensemble (ablation only)")
     p.add_argument("--no-detector", action="store_true",
-                   help="Désactiver le détecteur appris (fallback sur la détection heuristique)")
-    p.add_argument("--hybrid", action="store_true",
-                   help="Heuristique pour la carte centrale + détecteur appris pour les joueurs")
+                   help="Disable learned detector (pure heuristic fallback)")
+    p.set_defaults(tta=True, hybrid=True)
     return p.parse_args()
 
 
